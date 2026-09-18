@@ -19,8 +19,21 @@ root access they require.
 | `messagebox-dash.service` | Serve the canonical household dashboard on the Wi-Fi interface |
 
 One exact default recipient is stored with the private contact allow-list. A
-recognized NFC selection overrides that default; otherwise the default is used.
-No default, an unknown card, or invalid routing state fails closed.
+recognized NFC selection has first priority for a standalone recording. With no
+card and no claimed inbound message, the exact sender of the newest message
+played within the last hour is preferred in both recording modes. An active
+replay remains the newest played message even while the dashboard hides it in
+the queue, in-flight, hold, or trash state. If that newest fresh route is invalid
+or no longer allowed, recording fails closed; it never selects an older sender
+or the default. The explicit default is used only when played history is absent
+or expired. Unknown-card state and stale or missing NFC reader health also fail
+closed before recent-sender routing.
+
+Continuous sync owns the writable WhatsApp store. Outbound voice notes,
+played reactions, and recording presence use an immediate lock attempt so the
+pinned client delegates them to the active sync connection immediately.
+Commands that require exclusive store access, such as recipient refresh, pause
+sync and retain their bounded lock wait.
 
 The poller accepts wacli media types `audio` and `video`, converts the first
 audio track to the same mono 48 kHz WAV queue format, and retains the exact
@@ -55,10 +68,14 @@ it follows messages already waiting, while its sidecar keeps the original
 history identity and reply route. The sidecar is published before the WAV. A
 locked history record names the actual replay file, so repeated or concurrent
 requests cannot create duplicate playable entries and an interrupted
-pre-publication attempt can be retried immediately. History reads, audio access,
-and requeue all enforce expiry without a polling service. This covers voice
-notes and ordinary video soundtracks only; it does not add circular video-note
-support.
+pre-publication attempt can be retried immediately. The same lock covers replay
+scans, player claim/release/recovery, and dashboard hold/trash moves. Archiving
+keeps the replay marker until the WAV move commits, so restart recovery cannot
+lose the marker and publish a duplicate. History reads, audio access, and
+requeue all enforce expiry without a polling service. Active replays remain part
+of routing history even though the dashboard suppresses their duplicate Recently
+played row. This covers voice notes and ordinary video soundtracks only; it does
+not add circular video-note support.
 
 ## Setup services
 

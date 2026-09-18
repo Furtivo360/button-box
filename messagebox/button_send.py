@@ -31,7 +31,7 @@ from messagebox.guided_reply import (
     should_ring_after_unsent_session,
     voice_send_command,
 )
-from messagebox.played_history import archive_played_file
+from messagebox.played_history import archive_played_file, recent_reply_recipient
 from messagebox.listened_receipts import AnnouncementGate, ReceiptStore, parse_wacli_send_id
 from messagebox.contacts import ContactError, ContactStore
 from messagebox.nfc_state import AnnouncementStore, NfcError, active_selection, claim_selection
@@ -54,7 +54,9 @@ SPEAKER_CARD = os.environ.get("MSGBOX_SPEAKER_CARD", "Device")
 SPEAKER_CONTROL = os.environ.get("MSGBOX_SPEAKER_CONTROL", "PCM")
 BUTTON_PIN = int(os.environ.get("MSGBOX_BUTTON_PIN", "17"))
 LED_PIN = int(os.environ.get("MSGBOX_LED_PIN", "26"))
-LOCK_WAIT = os.environ.get("MSGBOX_LOCK_WAIT", "60s")
+# Sync owns the store continuously. An immediate lock failure lets wacli
+# delegate supported sends to its active sync connection without delaying them.
+SEND_LOCK_WAIT = "0s"
 WACLI_BIN = "/usr/local/bin/wacli"
 QUEUE_DIR = str(DEFAULT_QUEUE_DIR)
 OUTBOX_DIR = str(DEFAULT_OUTBOX_DIR)
@@ -336,6 +338,55 @@ def claim_fresh_card_intent():
     return "claimed", claimed
 
 
+def nfc_idle_routing_is_safe(contacts):
+    """Reject recent/default routing while fitted NFC state is unsafe."""
+    if not any(contact["card_uids"] for contact in contacts.values()):
+        return True
+    try:
+        if time.time() - os.stat(NFC_HEALTH_FILE).st_mtime > NFC_HEALTH_MAX_AGE_S:
+            log("recipient unavailable: NFC reader health is stale")
+            return False
+    except OSError:
+        log("recipient unavailable: NFC reader health is unavailable")
+        return False
+    if nfc_announcement_store.pending_action() in {"unknown", "invalid"}:
+        log("recipient unavailable: unrecognized card presentation")
+        return False
+    return True
+
+
+def recording_recipient_context():
+    """Prefer the exact recently played sender, then the configured default."""
+    try:
+        document = ContactStore(CONTACTS_FILE).load()
+    except (ContactError, OSError):
+        return None
+    contacts = document["contacts"]
+    # A presentation that arrives after the initial press check still owns the
+    # interaction. Invalid or unsafe card state must never fall through to a
+    # recent sender.
+    if Path(NFC_SELECTION_FILE).exists():
+        return current_recipient_context(claim=True)
+    if not nfc_idle_routing_is_safe(contacts):
+        return None
+
+    route_state, recipient = recent_reply_recipient(QUEUE_DIR, contacts)
+    if Path(NFC_SELECTION_FILE).exists():
+        return current_recipient_context(claim=True)
+    if not nfc_idle_routing_is_safe(contacts):
+        return None
+    if route_state == "route":
+        return {
+            "contact": {"jid": recipient, **contacts[recipient]},
+            "via_card": False,
+            "via_recent_reply": True,
+        }
+    if route_state == "blocked":
+        log("recipient unavailable: recent reply route is no longer valid")
+        return None
+    return current_recipient_context(claim=True)
+
+
 def routing_mode():
     """Describe startup routing without exposing a contact JID."""
     try:
@@ -582,7 +633,7 @@ def send_legacy_outbox_file(fname):
             "--to",
             recipient,
             "--lock-wait",
-            LOCK_WAIT,
+            SEND_LOCK_WAIT,
             "--json",
         ],
         capture_output=True,
@@ -656,7 +707,7 @@ def send_guided_job(job):
     # automatic duplicate resend.
     job = outbox_store.set_state(job, "sending", increment_attempts=True)
     sent = subprocess.run(
-        voice_send_command(WACLI_BIN, ogg, job.recipient, LOCK_WAIT),
+        voice_send_command(WACLI_BIN, ogg, job.recipient, SEND_LOCK_WAIT),
         capture_output=True,
         text=True,
     )
@@ -896,7 +947,7 @@ def react_played(meta):
             "--reaction",
             "🎧",
             "--lock-wait",
-            LOCK_WAIT,
+            SEND_LOCK_WAIT,
         ]
         if meta.get("sender_jid"):
             command += ["--sender", meta["sender_jid"]]
@@ -1077,7 +1128,7 @@ def play_warning_for_approval(path, session_id=None):
 def presence(kind, recipient):
     subcommand = ["typing", "--media", "audio"] if kind == "recording" else ["paused"]
     subprocess.Popen(
-        [WACLI_BIN, "presence", *subcommand, "--to", recipient, "--lock-wait", LOCK_WAIT],
+        [WACLI_BIN, "presence", *subcommand, "--to", recipient, "--lock-wait", SEND_LOCK_WAIT],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -1263,7 +1314,7 @@ def record_and_send_legacy(settings=None, pressed_at=None):
         block_unavailable_recipient()
         return
     if card_state == "none":
-        context = current_recipient_context(claim=True)
+        context = recording_recipient_context()
     if context is None:
         block_unavailable_recipient()
         return
@@ -1343,7 +1394,7 @@ def run_guided_once(settings=None):
     flow_kind = "reply" if claim else "standalone"
     metadata = claim["meta"] if claim else None
     if not claim and card_state == "none":
-        context = current_recipient_context(claim=True)
+        context = recording_recipient_context()
     recipient = metadata.get("chat") if metadata else (
         context["contact"]["jid"] if context else None
     )
