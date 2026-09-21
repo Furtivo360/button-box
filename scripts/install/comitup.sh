@@ -84,9 +84,12 @@ trap 'exit 1' HUP INT TERM
 [ "$(uname -m)" = aarch64 ] || die "Comitup onboarding requires aarch64."
 [ "$(dpkg --print-architecture)" = arm64 ] || die "Comitup onboarding requires Debian arm64."
 [ -r /proc/device-tree/model ] || die "Raspberry Pi model information is unavailable."
-case $(tr -d '\000' </proc/device-tree/model) in
-  *"Raspberry Pi 4 Model"*) ;;
-  *) die "Comitup onboarding is validated only on Raspberry Pi 4." ;;
+model=$(tr -d '\000' </proc/device-tree/model)
+case "$model" in
+  *"Raspberry Pi 4 Model"*|*"Raspberry Pi Zero 2 W"*) ;;
+  *)
+    echo "Warning: unvalidated board model: $model; continuing with the Zero 2 W compatibility patch." >&2
+    ;;
 esac
 . /etc/os-release
 [ "${VERSION_CODENAME:-}" = trixie ] || die "Raspberry Pi OS/Debian trixie is required."
