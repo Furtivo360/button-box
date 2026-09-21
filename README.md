@@ -1,5 +1,13 @@
 # Button Box
 
+WORK IN PROGRESS
+
+The aim of this fork is:
+- add full compatibility with Raspberry Pi Zero 2W;
+- add an extra layer of security to the box by adding login and password to the dashboard;
+- change some components to make the light of the arcade button working on 12v;
+- more to come.
+
 ![Illustrated Button Box with a glowing blue button and family portraits](assets/readme-hero.webp)
 
 > **[Join the Button Box WhatsApp community →](https://chat.whatsapp.com/FJ8LYL79k8zEMfoiyPjLPb?mode=gi_t)**
