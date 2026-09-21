@@ -95,6 +95,55 @@ class DashboardSettingsTests(unittest.TestCase):
                 self.assertEqual(payload["mode"], "RUNTIME")
                 self.assertEqual(payload["health"]["runtime"], "attention")
 
+    def test_dashboard_login_requires_credentials_when_enabled(self):
+        with patch.dict(
+            dashboard.os.environ,
+            {"MSGBOX_DASH_USERNAME": "admin", "MSGBOX_DASH_PASSWORD": "secret"},
+            clear=False,
+        ):
+            code, payload = self.request("GET", "/api/settings")
+            self.assertEqual(code, 401)
+            self.assertEqual(payload["error"], "authentication required")
+
+    def test_dashboard_login_session_allows_access(self):
+        with patch.dict(
+            dashboard.os.environ,
+            {"MSGBOX_DASH_USERNAME": "admin", "MSGBOX_DASH_PASSWORD": "secret"},
+            clear=False,
+        ):
+            token = dashboard.issue_dashboard_session("admin")
+            code, payload = self.request(
+                "GET",
+                "/api/settings",
+                headers={"Cookie": f"{dashboard.AUTH_COOKIE}={token}"},
+            )
+            self.assertEqual(code, 200)
+            self.assertIn("settings", payload)
+
+    def test_dashboard_logout_invalidates_session_and_expires_cookie(self):
+        with patch.dict(
+            dashboard.os.environ,
+            {"MSGBOX_DASH_USERNAME": "admin", "MSGBOX_DASH_PASSWORD": "secret"},
+            clear=False,
+        ):
+            token = dashboard.issue_dashboard_session("admin")
+            handler = dashboard.Handler.__new__(dashboard.Handler)
+            handler.path = "/logout"
+            handler.headers = {
+                "Cookie": f"{dashboard.AUTH_COOKIE}={token}",
+                "Host": "button-box.local",
+                "Origin": "http://button-box.local",
+            }
+            handler.client_address = ("192.168.1.20", 12345)
+            handler.local_host = "button-box.local"
+            handler.tailscale_host = None
+            with patch.object(handler, "_send") as send:
+                handler.do_POST()
+
+        self.assertNotIn(token, dashboard.DASHBOARD_SESSIONS)
+        self.assertEqual(send.call_args.args[:2], (200, '{"ok": true}'))
+        self.assertIn("Max-Age=0", send.call_args.kwargs["extra_headers"]["Set-Cookie"])
+
     def test_ringtone_preview_reports_playback_failure(self):
         with patch.object(dashboard, "preview_ringtone", side_effect=SettingsError("Button Box audio could not play")):
             code, payload = self.request(

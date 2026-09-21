@@ -1249,6 +1249,18 @@ async function loadState() {
   }
 }
 
+async function logoutDashboard() {
+  const button = document.getElementById("logout-dashboard");
+  button.disabled = true;
+  try {
+    await request("/logout", { method: "POST" });
+    window.location.assign("/login");
+  } catch (error) {
+    button.disabled = false;
+    showError(error.message);
+  }
+}
+
 async function pairWhatsApp(event) {
   event.preventDefault();
   const button = event.currentTarget.querySelector('button[type="submit"]');
@@ -1449,6 +1461,7 @@ document.getElementById("preview-ringtone").addEventListener("click", async () =
   }
 });
 document.getElementById("ring-now").addEventListener("click", ringNow);
+document.getElementById("logout-dashboard").addEventListener("click", logoutDashboard);
 document.getElementById("copy-box-id").addEventListener("click", () => {
   const button = document.getElementById("copy-box-id");
   if (button.disabled) return;
