@@ -20,6 +20,7 @@ function harness() {
     window: {
       clearTimeout() {}, setTimeout() {}, addEventListener() {},
       scrollTo() { h.scrolls++; }, isSecureContext: false,
+      location: { hash: "#home", assign(url) { h.location = url; } },
       ButtonBoxClipboard: { async copyText(text) { if (h.fail) throw Error("denied"); h.copied = text; } },
     },
     navigator: {}, location: { hash: "#home" },
@@ -101,4 +102,11 @@ test("View changes reset scroll once, polling preserves it; skip link does not c
   h.node("skip-link").handlers.click({ preventDefault() { prevented = true; } });
   expect(prevented).toBe(true);
   expect(h.node("main").focused).toBe(true);
+});
+
+test("Logout invalidates the dashboard session and returns to login", async () => {
+  const h = harness();
+  await h.node("logout-dashboard").handlers.click();
+  expect(h.calls[0]).toEqual({ url: "/logout", options: { cache: "no-store", method: "POST" } });
+  expect(h.location).toBe("/login");
 });

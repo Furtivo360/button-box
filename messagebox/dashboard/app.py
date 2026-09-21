@@ -75,6 +75,85 @@ from messagebox.wifi_change import request_change as request_wifi_change
 
 BIND = os.environ.get("MSGBOX_DASH_BIND", "wlan0").strip()
 PORT = int(os.environ.get("MSGBOX_DASH_PORT", "80"))
+AUTH_COOKIE = "messagebox_dashboard_session"
+DASHBOARD_SESSIONS = {}
+DASHBOARD_LOGIN_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Button Box Login</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: sans-serif;
+      background: #f3f5f7;
+      color: #1f2937;
+    }
+    .panel {
+      width: min(24rem, calc(100vw - 2rem));
+      background: #fff;
+      border: 1px solid #d5dbe3;
+      border-radius: 0.85rem;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      padding: 1.5rem;
+    }
+    h1 { margin-top: 0; font-size: 1.75rem; }
+    label { display: block; font-weight: 600; margin: 0.9rem 0 0.35rem; }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 0.7rem 0.8rem;
+      border: 1px solid #cbd5e1;
+      border-radius: 0.5rem;
+      font: inherit;
+    }
+    button {
+      width: 100%;
+      margin-top: 1rem;
+      padding: 0.8rem 1rem;
+      border: 0;
+      border-radius: 0.5rem;
+      background: #0f172a;
+      color: #fff;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .notice {
+      margin-top: 1rem;
+      color: #475569;
+      font-size: 0.95rem;
+    }
+    .error {
+      margin-top: 0.8rem;
+      color: #b91c1c;
+      min-height: 1.2rem;
+      font-size: 0.94rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Button Box</h1>
+    <form method="post" action="/login">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Log in</button>
+    </form>
+    <div class="error"></div>
+    <div class="notice">This dashboard is protected by the configured caregiver credentials.</div>
+  </main>
+</body>
+</html>
+"""
+
 QUEUE_DIR = str(DEFAULT_QUEUE_DIR)
 HOLD_DIR = os.path.join(QUEUE_DIR, ".hold")
 TRASH_DIR = os.path.join(QUEUE_DIR, ".trash")
@@ -128,6 +207,18 @@ def resolve_bind(value):
         request = struct.pack("256s", value[:15].encode("ascii"))
         response = fcntl.ioctl(control.fileno(), 0x8915, request)
     return socket.inet_ntoa(response[20:24])
+
+
+def dashboard_login_enabled():
+    username = os.environ.get("MSGBOX_DASH_USERNAME", "").strip()
+    password = os.environ.get("MSGBOX_DASH_PASSWORD", "").strip()
+    return bool(username and password)
+
+
+def issue_dashboard_session(username):
+    token = secrets.token_urlsafe(24)
+    DASHBOARD_SESSIONS[token] = username
+    return token
 
 
 def settings_store():
@@ -1029,12 +1120,14 @@ class Handler(BaseHTTPRequestHandler):
     local_host = None
     tailscale_host = None
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", extra_headers=None):
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
@@ -1090,6 +1183,34 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _dashboard_cookie(self):
+        cookie_header = self.headers.get("Cookie", "")
+        for part in cookie_header.split(";"):
+            if "=" not in part:
+                continue
+            name, value = [item.strip() for item in part.split("=", 1)]
+            if name == AUTH_COOKIE:
+                return value
+        return None
+
+    def _dashboard_authenticated(self):
+        if not dashboard_login_enabled():
+            return True
+        username = os.environ.get("MSGBOX_DASH_USERNAME", "").strip()
+        token = self._dashboard_cookie()
+        if not token:
+            return False
+        return DASHBOARD_SESSIONS.get(token) == username
+
+    def _dashboard_login_required(self, url_path):
+        if not dashboard_login_enabled():
+            return False
+        if self._dashboard_authenticated():
+            return False
+        if url_path in {"/", "/login"}:
+            return False
+        return True
+
     def _json_body(self, limit=16384):
         if not self._require_json():
             return None
@@ -1133,6 +1254,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self._require_trusted_host():
             return
         url = urllib.parse.urlparse(self.path)
+        if self._dashboard_login_required(url.path):
+            return self._send(401, json.dumps({"ok": False, "error": "authentication required"}))
+        if dashboard_login_enabled() and not self._dashboard_authenticated():
+            if url.path == "/login":
+                return self._send(200, DASHBOARD_LOGIN_HTML, "text/html; charset=utf-8")
+            if url.path == "/":
+                return self._send(200, DASHBOARD_LOGIN_HTML, "text/html; charset=utf-8")
         static = DASHBOARD_STATIC.get(url.path)
         if static is not None:
             return self._send(200, *static)
@@ -1238,6 +1366,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
+        if url.path == "/login":
+            payload = self._form_body()
+            if payload is None:
+                return
+            username = (payload.get("username") or "").strip()
+            password = payload.get("password") or ""
+            expected_username = os.environ.get("MSGBOX_DASH_USERNAME", "").strip()
+            expected_password = os.environ.get("MSGBOX_DASH_PASSWORD", "").strip()
+            if dashboard_login_enabled() and username == expected_username and password == expected_password:
+                token = issue_dashboard_session(username)
+                self.send_response(303)
+                self.send_header("Location", "/")
+                self.send_header(
+                    "Set-Cookie",
+                    f"{AUTH_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax",
+                )
+                self.end_headers()
+                return
+            return self._send(401, json.dumps({"ok": False, "error": "authentication required"}))
+        if url.path == "/logout":
+            if not self._require_same_origin():
+                return
+            token = self._dashboard_cookie()
+            if token:
+                DASHBOARD_SESSIONS.pop(token, None)
+            return self._send(
+                200,
+                json.dumps({"ok": True}),
+                extra_headers={
+                    "Set-Cookie": f"{AUTH_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
+                },
+            )
         if url.path != "/api/wacli-receipt" and not self._require_same_origin():
             return
         if url.path == "/api/ringtone-preview":
